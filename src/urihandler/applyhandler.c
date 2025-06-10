@@ -353,7 +353,7 @@ void applyAdvancedConfig(char *buf)
     if (txPower >= 8 && txPower <= 84)
     {
         ESP_LOGI(TAG, "Setting Wifi tx power to %d.", txPower);
-        ESP_ERROR_CHECK(nvs__set_i32(nvs, "txpower", txPower));
+        ESP_ERROR_CHECK(nvs_set_i32(nvs, "txpower", txPower));
     }
     readUrlParameterIntoBuffer(buf, "bandwith", param, contentLength);
     int useLowerBandwith = atoi(param);
