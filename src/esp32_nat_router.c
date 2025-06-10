@@ -8,6 +8,7 @@
 */
 
 #include <pthread.h>
+#include <string.h>
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_console.h"
@@ -691,8 +692,8 @@ static void start_ethernet(void)
     eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
     
     // Use the newer struct for SMI GPIO configuration
-    esp32_emac_config.smi_gpio.mdc_gpio_num = 23;
-    esp32_emac_config.smi_gpio.mdio_gpio_num = 18;
+    esp32_emac_config.smi_mdc_gpio_num = 23;
+    esp32_emac_config.smi_mdio_gpio_num = 18;
     
     // Create new ESP32 MAC instance
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
@@ -704,7 +705,8 @@ static void start_ethernet(void)
     ESP_ERROR_CHECK(esp_eth_driver_install(&config, ð_handle));
     
     /* The ESP32 is wired for RMII interface, so attach the driver to it */
-    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_get_netif_glue(eth_handle)));
+    void *glue = esp_eth_get_netif_glue(eth_handle);
+    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, glue));
 
     /* start Ethernet driver state machine */
     ESP_ERROR_CHECK(esp_eth_start(eth_handle));
@@ -909,7 +911,7 @@ void app_main(void)
         ESP_LOGI(TAG, "Uplink mode: Ethernet");
         ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
         start_ethernet();
-        free(uplink_mode);
+        if (uplink_mode) free(uplink_mode);
     }
     else
     {
@@ -923,6 +925,7 @@ void app_main(void)
         {
             ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
         }
+        if (uplink_mode) free(uplink_mode);
     }
     start_wifi_ap(ap_ssid, ap_passwd, ap_ip);
 
@@ -976,7 +979,7 @@ void app_main(void)
     }
     else
     {
-        ESP_LOGW(TAG, "Web server is disabled. Reenable with following commands and reboot device afterwards:");
+        ESP_LOGW(TAG, "Web server is disabled. Reenable with following commands and reboot afterwards:");
         ESP_LOGW(TAG, "'nvs_namespace esp32_nat'");
         ESP_LOGW(TAG, "'nvs_set lock i32 -v 0'");
     }
