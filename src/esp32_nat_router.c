@@ -55,7 +55,7 @@
 
 #if CONFIG_IDF_TARGET_ESP32
 // Changed from 23 to 34 to avoid conflict with Ethernet MDC pin on WT32-ETH01
-#define RESET_PIN GPIO_NUM_34
+#define RESET_PIN GPIO_NUM_13
 #else
 #define RESET_PIN GPIO_NUM_18
 #endif
