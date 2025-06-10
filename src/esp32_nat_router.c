@@ -37,6 +37,10 @@
 #include <esp_netif.h>
 
 #include "esp_eth.h"
+#include "esp_eth_mac.h"
+#include "esp_eth_phy.h"
+#include "esp_eth_driver.h"
+
 
 #if !IP_NAPT
 #error "IP_NAPT must be defined"
@@ -75,7 +79,7 @@ struct portmap_table_entry portmap_tab[PORTMAP_MAX];
 esp_netif_t *wifiAP;
 esp_netif_t *wifiSTA;
 esp_netif_t *eth_netif;
-esp_netif_t *uplink_netif = NULL; //
+esp_netif_t *uplink_netif = NULL;
 httpd_handle_t start_webserver(void);
 
 static const char *TAG = "ESP32NRE";
@@ -303,13 +307,13 @@ void *led_status_thread(void *p)
 
     while (true)
     {
-        gpio_set_level(BLINK_GPIO, ap_connect);
+        gpio_set_level(BLINK_GPIO, ap_connect || eth_link_up);
 
         for (int i = 0; i < connect_count; i++)
         {
-            gpio_set_level(BLINK_GPIO, 1 - ap_connect);
+            gpio_set_level(BLINK_GPIO, 1 - (ap_connect || eth_link_up));
             vTaskDelay(50 / portTICK_PERIOD_MS);
-            gpio_set_level(BLINK_GPIO, ap_connect);
+            gpio_set_level(BLINK_GPIO, ap_connect || eth_link_up);
             vTaskDelay(50 / portTICK_PERIOD_MS);
         }
 
@@ -455,7 +459,13 @@ static void on_got_ip(void *arg, esp_event_base_t event_base,
 
     ESP_LOGI(TAG, "Got IP: http://" IPSTR, IP2STR(&event->ip_info.ip));
     stop_dns_server();
-    ap_connect = true;
+    
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ap_connect = true;
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+
     my_ip = event->ip_info.ip.addr;
     delete_portmap_tab();
     apply_portmap_tab();
@@ -465,11 +475,6 @@ static void on_got_ip(void *arg, esp_event_base_t event_base,
         esp_ip_addr_t newDns;
         fillDNS(&newDns, &dns.ip);
         setDnsServer(wifiAP, &newDns); // Set the correct DNS server for the AP clients
-    }
-
-    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
-    {
-        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
 
@@ -499,6 +504,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
+/** Event handler for Ethernet events */
 static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
 {
@@ -506,18 +512,17 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     /* we can get the ethernet driver handle from event data */
     esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
 
-    switch (event_id)
-    {
+    switch (event_id) {
     case ETHERNET_EVENT_CONNECTED:
-        esp_eth_get_mac(eth_handle, mac_addr);
         ESP_LOGI(TAG, "Ethernet Link Up");
+        eth_link_up = true;
+        // The modern way to get the MAC is from the netif, not the driver
+        esp_netif_get_mac(eth_netif, mac_addr);
         ESP_LOGI(TAG, "Ethernet HW Addr %02x:%02x:%02x:%02x:%02x:%02x",
                  mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
-        eth_link_up = true;
         break;
     case ETHERNET_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "Ethernet Link Down");
-        ap_connect = false;
         eth_link_up = false;
         break;
     case ETHERNET_EVENT_START:
@@ -525,13 +530,13 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
         break;
     case ETHERNET_EVENT_STOP:
         ESP_LOGI(TAG, "Ethernet Stopped");
-        ap_connect = false;
         eth_link_up = false;
         break;
     default:
         break;
     }
 }
+
 
 const int CONNECTED_BIT = BIT0;
 #define JOIN_TIMEOUT_MS (2000)
@@ -670,8 +675,8 @@ static void start_wifi_sta(const char *ssid, const char *passwd, const char *sta
 static void start_ethernet(void)
 {
     // Create new default instance of esp-netif for Ethernet
-    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
-    eth_netif = esp_netif_new(&cfg);
+    esp_netif_config_t cfg_eth = ESP_NETIF_DEFAULT_ETH();
+    eth_netif = esp_netif_new(&cfg_eth);
     uplink_netif = eth_netif;
 
     // Init MAC and PHY configs to default
@@ -682,23 +687,22 @@ static void start_ethernet(void)
     phy_config.phy_addr = 0;
     phy_config.reset_gpio_num = 5;
 
-    // Init MAC
-    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&mac_config);
-    // Init PHY
-    esp_eth_phy_t *phy = esp_eth_phy_new_lan8720(&phy_config);
+    // Init ESP32-specific MAC config
+    eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+    // According to the WT32-ETH01 schematic, the MDC and MDIO are on GPIO23 and GPIO18.
+    esp32_emac_config.smi_mdc_gpio_num = 23;
+    esp32_emac_config.smi_mdio_gpio_num = 18;
+    
+    // Create new ESP32 MAC instance
+    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
+    // Create new PHY instance
+    esp_eth_phy_t *phy = esp_eth_phy_new_lan87xx(&phy_config);
 
     esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
     esp_eth_handle_t eth_handle = NULL;
     ESP_ERROR_CHECK(esp_eth_driver_install(&config, ð_handle));
-
-    // The EMAC_CLK_OUT signal needs to be output on GPIO0 for the RMII clock.
-    // Some boards might do this automatically. It's safe to add.
-    // NOTE: This is for RMII clock on GPIO0. WT32-ETH01 uses an external crystal,
-    // so this might not be needed, but it doesn't hurt.
-    // gpio_set_direction(GPIO_NUM_0, GPIO_MODE_OUTPUT);
-    // gpio_set_level(GPIO_NUM_0, 1);
-
-    /* attach Ethernet driver to TCP/IP stack */
+    
+    /* The ESP32 is wired for RMII interface, so attach the driver to it */
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_get_netif_glue(eth_handle)));
 
     /* start Ethernet driver state machine */
