@@ -1,5 +1,3 @@
-7.2.0
+7.2.1
 
-Fixed Wifi scanning for newer esp-idf-versions
-Updated to newest esp-idf-version
-Replaced deprecated features
+chatgpt-ed my way into it
