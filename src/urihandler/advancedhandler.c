@@ -42,6 +42,8 @@ esp_err_t advanced_download_get_handler(httpd_req_t *req)
     char *classCCB = "";
     char *customMaskCB = "";
     char *customMask = "";
+    char *wifiUplinkCB = "";
+    char *ethUplinkCB = "";
 
     char currentMAC[18];
     char defaultMAC[18];
@@ -50,6 +52,15 @@ esp_err_t advanced_download_get_handler(httpd_req_t *req)
     int32_t octet = 4;
     get_config_param_str("hostname", &hostName);
     get_config_param_int("octet", &octet);
+
+    char* uplink_mode = NULL;
+    get_config_param_str("uplink_mode", &uplink_mode);
+    if(uplink_mode != NULL && strcmp(uplink_mode, "eth") == 0) {
+        ethUplinkCB = "checked";
+    } else {
+        wifiUplinkCB = "checked";
+    }
+    if (uplink_mode) free(uplink_mode);
 
     int32_t txPower = 0;
     get_config_param_int("txpower", &txPower);
@@ -68,7 +79,7 @@ esp_err_t advanced_download_get_handler(httpd_req_t *req)
     { // medium
         lowSelected = "";
         mediumSelected = "selected";
-        highSelected = "";
+        highSelected = "selected";
     }
     else
     { // high
@@ -182,7 +193,7 @@ esp_err_t advanced_download_get_handler(httpd_req_t *req)
         customMask = netmask;
     }
 
-    u_int size = advanced_html_size + strlen(aliveCB) + strlen(ledCB) + strlen(natCB) + strlen(currentDNS) + strlen(currentMAC) + 3 * strlen("checked") + strlen(customDNSIP) + 2 * strlen(defaultMAC) + strlen(customMac) + strlen(netmask) + strlen(hostName) + 2 * strlen("selected") + strlen(customMask) + 4 /* 4 * Octet - 4 *%d*/;
+    u_int size = advanced_html_size + strlen(aliveCB) + strlen(ledCB) + strlen(natCB) + strlen(currentDNS) + strlen(currentMAC) + 3 * strlen("checked") + strlen(customDNSIP) + 2 * strlen(defaultMAC) + strlen(customMac) + strlen(netmask) + strlen(hostName) + 2 * strlen("selected") + strlen(customMask) + 4 + strlen(wifiUplinkCB) + strlen(ethUplinkCB);
     ESP_LOGI(TAG, "Allocating additional %d bytes for advanced page.", size);
     char *advanced_page = malloc(size);
 
@@ -191,7 +202,7 @@ esp_err_t advanced_download_get_handler(httpd_req_t *req)
 
     subMac[strlen(subMac) - 2] = '\0';
 
-    sprintf(advanced_page, advanced_start, hostName, octet, lowSelected, mediumSelected, highSelected, bwHigh, bwLow, ledCB, aliveCB, natCB, currentDNS, defCB, cloudCB, adguardCB, customCB, customDNSIP, currentMAC, defMacCB, defaultMAC, rndMacCB, subMac, customMacCB, customMac, netmask, classCCB, octet, classBCB, octet, classACB, octet, customMaskCB, customMask);
+    sprintf(advanced_page, advanced_start, hostName, octet, lowSelected, mediumSelected, highSelected, bwHigh, bwLow, ledCB, aliveCB, natCB, currentDNS, defCB, cloudCB, adguardCB, customCB, customDNSIP, wifiUplinkCB, ethUplinkCB, currentMAC, defMacCB, defaultMAC, rndMacCB, subMac, customMacCB, customMac, netmask, classCCB, octet, classBCB, octet, classACB, octet, customMaskCB, customMask);
 
     closeHeader(req);
     esp_err_t ret = httpd_resp_send(req, advanced_page, HTTPD_RESP_USE_STRLEN);
