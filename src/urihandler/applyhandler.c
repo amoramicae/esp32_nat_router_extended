@@ -171,6 +171,14 @@ void applyAdvancedConfig(char *buf)
 
     size_t contentLength = 250;
     char param[contentLength];
+
+    readUrlParameterIntoBuffer(buf, "uplink", param, contentLength);
+    if (strlen(param) > 0)
+    {
+        ESP_LOGI(TAG, "Uplink mode set to '%s'", param);
+        ESP_ERROR_CHECK(nvs_set_str(nvs, "uplink_mode", param));
+    }
+
     readUrlParameterIntoBuffer(buf, "keepalive", param, contentLength);
 
     if (strlen(param) > 0)
@@ -345,7 +353,7 @@ void applyAdvancedConfig(char *buf)
     if (txPower >= 8 && txPower <= 84)
     {
         ESP_LOGI(TAG, "Setting Wifi tx power to %d.", txPower);
-        ESP_ERROR_CHECK(nvs_set_i32(nvs, "txpower", txPower));
+        ESP_ERROR_CHECK(nvs__set_i32(nvs, "txpower", txPower));
     }
     readUrlParameterIntoBuffer(buf, "bandwith", param, contentLength);
     int useLowerBandwith = atoi(param);
