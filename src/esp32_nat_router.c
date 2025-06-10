@@ -509,8 +509,8 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
                               int32_t event_id, void *event_data)
 {
     uint8_t mac_addr[6] = {0};
-    /* we can get the ethernet driver handle from event data */
-    esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
+    /* The event data contains the handle to the driver, but we don't need it here, so we can comment it out to avoid a warning */
+    // esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
 
     switch (event_id) {
     case ETHERNET_EVENT_CONNECTED:
@@ -689,9 +689,10 @@ static void start_ethernet(void)
 
     // Init ESP32-specific MAC config
     eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
-    // According to the WT32-ETH01 schematic, the MDC and MDIO are on GPIO23 and GPIO18.
-    esp32_emac_config.smi_mdc_gpio_num = 23;
-    esp32_emac_config.smi_mdio_gpio_num = 18;
+    
+    // Use the newer struct for SMI GPIO configuration
+    esp32_emac_config.smi_gpio.mdc_gpio_num = 23;
+    esp32_emac_config.smi_gpio.mdio_gpio_num = 18;
     
     // Create new ESP32 MAC instance
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
@@ -975,7 +976,7 @@ void app_main(void)
     }
     else
     {
-        ESP_LOGW(TAG, "Web server is disabled. Reenable with following commands and reboot afterwards:");
+        ESP_LOGW(TAG, "Web server is disabled. Reenable with following commands and reboot device afterwards:");
         ESP_LOGW(TAG, "'nvs_namespace esp32_nat'");
         ESP_LOGW(TAG, "'nvs_set lock i32 -v 0'");
     }
