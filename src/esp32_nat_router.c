@@ -691,10 +691,9 @@ static void start_ethernet(void)
     // Init ESP32-specific MAC config
     eth_esp32_emac_config_t esp32_emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
     
-    // Use the newer struct for SMI GPIO configuration
-    esp32_emac_config.smi_mdc_gpio_num = 23;
-    esp32_emac_config.smi_mdio_gpio_num = 18;
-    esp32_emac_config.smi_gpio.clock_speed = ETH_SMI_SPEED_DEFAULT;
+    // Use the new smi_gpio struct instead of deprecated individual pins
+    esp32_emac_config.smi_gpio.mdc_num = 23;
+    esp32_emac_config.smi_gpio.mdio_num = 18;
    
     // Create new ESP32 MAC instance
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
@@ -703,7 +702,7 @@ static void start_ethernet(void)
 
     esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
     esp_eth_handle_t eth_handle = NULL;
-    ESP_ERROR_CHECK(esp_eth_driver_install(&config, ð_handle));
+    ESP_ERROR_CHECK(esp_eth_driver_install(&config, &eth_handle));
     
     /* The ESP32 is wired for RMII interface, so attach the driver to it */
     void *glue = esp_eth_new_netif_glue(eth_handle);
@@ -894,7 +893,7 @@ void app_main(void)
 
     // Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(ETH_EVENT, ESP_EVENT_ANY_ID, ð_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_got_ip, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &on_got_ip, NULL, NULL));
 
