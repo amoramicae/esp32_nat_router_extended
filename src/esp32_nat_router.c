@@ -702,7 +702,7 @@ static void start_ethernet(void)
     esp_eth_phy_t *phy = esp_eth_phy_new_lan87xx(&phy_config);
 
     esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
-    esp_eth_handle_t eth_handle= NULL;
+    esp_eth_handle_t eth_handle = NULL;
     ESP_ERROR_CHECK(esp_eth_driver_install(&config, ð_handle));
     
     /* The ESP32 is wired for RMII interface, so attach the driver to it */
