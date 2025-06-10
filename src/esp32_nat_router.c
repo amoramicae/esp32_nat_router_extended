@@ -36,6 +36,8 @@
 #include "esp_mac.h"
 #include <esp_netif.h>
 
+#include "esp_eth.h"
+
 #if !IP_NAPT
 #error "IP_NAPT must be defined"
 #endif
@@ -47,7 +49,8 @@
 #define BLINK_GPIO 2
 
 #if CONFIG_IDF_TARGET_ESP32
-#define RESET_PIN GPIO_NUM_23
+// Changed from 23 to 34 to avoid conflict with Ethernet MDC pin on WT32-ETH01
+#define RESET_PIN GPIO_NUM_34
 #else
 #define RESET_PIN GPIO_NUM_18
 #endif
@@ -62,6 +65,7 @@ static EventGroupHandle_t wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
 
 bool ap_connect = false;
+bool eth_link_up = false; // Global to track Ethernet link status
 
 uint32_t my_ip;
 uint32_t my_ap_ip;
@@ -70,7 +74,8 @@ struct portmap_table_entry portmap_tab[PORTMAP_MAX];
 
 esp_netif_t *wifiAP;
 esp_netif_t *wifiSTA;
-
+esp_netif_t *eth_netif;
+esp_netif_t *uplink_netif = NULL; //
 httpd_handle_t start_webserver(void);
 
 static const char *TAG = "ESP32NRE";
@@ -438,6 +443,36 @@ void setDnsServer(esp_netif_t *network, esp_ip_addr_t *dnsIP)
     }
 }
 
+static void on_got_ip(void *arg, esp_event_base_t event_base,
+                      int32_t event_id, void *event_data)
+{
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    if (uplink_netif != event->esp_netif)
+    {
+        ESP_LOGW(TAG, "Got IP from unknown interface: %s", esp_netif_get_ifkey(event->esp_netif));
+        return;
+    }
+
+    ESP_LOGI(TAG, "Got IP: http://" IPSTR, IP2STR(&event->ip_info.ip));
+    stop_dns_server();
+    ap_connect = true;
+    my_ip = event->ip_info.ip.addr;
+    delete_portmap_tab();
+    apply_portmap_tab();
+    esp_netif_dns_info_t dns;
+    if (esp_netif_get_dns_info(uplink_netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK)
+    {
+        esp_ip_addr_t newDns;
+        fillDNS(&newDns, &dns.ip);
+        setDnsServer(wifiAP, &newDns); // Set the correct DNS server for the AP clients
+    }
+
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -454,24 +489,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "retry to connect to the STA");
         xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
-    {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "Got IP: http://" IPSTR, IP2STR(&event->ip_info.ip));
-        stop_dns_server();
-        ap_connect = true;
-        my_ip = event->ip_info.ip.addr;
-        delete_portmap_tab();
-        apply_portmap_tab();
-        esp_netif_dns_info_t dns;
-        if (esp_netif_get_dns_info(wifiSTA, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK)
-        {
-            esp_ip_addr_t newDns;
-            fillDNS(&newDns, &dns.ip);
-            setDnsServer(wifiAP, &newDns); // Set the correct DNS server for the AP clients
-        }
-        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
-    }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED)
     {
         ESP_LOGI(TAG, "Station connected");
@@ -481,6 +498,41 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "Station disconnected");
     }
 }
+
+static void eth_event_handler(void *arg, esp_event_base_t event_base,
+                              int32_t event_id, void *event_data)
+{
+    uint8_t mac_addr[6] = {0};
+    /* we can get the ethernet driver handle from event data */
+    esp_eth_handle_t eth_handle = *(esp_eth_handle_t *)event_data;
+
+    switch (event_id)
+    {
+    case ETHERNET_EVENT_CONNECTED:
+        esp_eth_get_mac(eth_handle, mac_addr);
+        ESP_LOGI(TAG, "Ethernet Link Up");
+        ESP_LOGI(TAG, "Ethernet HW Addr %02x:%02x:%02x:%02x:%02x:%02x",
+                 mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+        eth_link_up = true;
+        break;
+    case ETHERNET_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "Ethernet Link Down");
+        ap_connect = false;
+        eth_link_up = false;
+        break;
+    case ETHERNET_EVENT_START:
+        ESP_LOGI(TAG, "Ethernet Started");
+        break;
+    case ETHERNET_EVENT_STOP:
+        ESP_LOGI(TAG, "Ethernet Stopped");
+        ap_connect = false;
+        eth_link_up = false;
+        break;
+    default:
+        break;
+    }
+}
+
 const int CONNECTED_BIT = BIT0;
 #define JOIN_TIMEOUT_MS (2000)
 
@@ -519,27 +571,9 @@ void setWpaEnterprise(const char *sta_identity, const char *sta_user, const char
     ESP_ERROR_CHECK(esp_wifi_sta_enterprise_enable());
 }
 
-void wifi_init(const char *ssid, const char *passwd, const char *static_ip, const char *subnet_mask, const char *gateway_addr, const char *ap_ssid, const char *ap_passwd, const char *ap_ip, const char *sta_user, const char *sta_identity)
+static void start_wifi_ap(const char *ap_ssid, const char *ap_passwd, const char *ap_ip)
 {
-
-    wifi_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
     wifiAP = esp_netif_create_default_wifi_ap();
-    wifiSTA = esp_netif_create_default_wifi_sta();
-
-    esp_netif_ip_info_t ipInfo_sta;
-    if ((strlen(ssid) > 0) && (strlen(static_ip) > 0) && (strlen(subnet_mask) > 0) && (strlen(gateway_addr) > 0))
-    {
-        my_ip = ipInfo_sta.ip.addr = ipaddr_addr(static_ip);
-        ipInfo_sta.gw.addr = ipaddr_addr(gateway_addr);
-        ipInfo_sta.netmask.addr = ipaddr_addr(subnet_mask);
-        esp_netif_dhcpc_stop(wifiSTA); // Don't run a DHCP client
-        esp_netif_set_ip_info(wifiSTA, &ipInfo_sta);
-        apply_portmap_tab();
-    }
-
     my_ap_ip = ipaddr_addr(ap_ip);
 
     esp_netif_ip_info_t ipInfo_ap;
@@ -547,45 +581,13 @@ void wifi_init(const char *ssid, const char *passwd, const char *static_ip, cons
     ipInfo_ap.gw.addr = my_ap_ip;
 
     char *netmask = getNetmask();
-
     ipInfo_ap.netmask.addr = ipaddr_addr(netmask);
-
     ESP_LOGI(TAG, "Netmask is set to %s, therefore private IP is %s", netmask, ap_ip);
+    free(netmask);
 
     esp_netif_dhcps_stop(wifiAP); // stop before setting ip WifiAP
     esp_netif_set_ip_info(wifiAP, &ipInfo_ap);
     esp_netif_dhcps_start(wifiAP);
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    int32_t isLowerBandwith = 0;
-    get_config_param_int("lower_bandwith", &isLowerBandwith);
-    if (isLowerBandwith == 1)
-    {
-        ESP_LOGI(TAG, "Setting the bandwith to 40 MHz");
-        esp_err_t err = esp_wifi_set_bandwidth(ESP_IF_WIFI_STA, WIFI_BW_HT40);
-        if (err == ESP_ERR_INVALID_ARG)
-        {
-            ESP_LOGE(TAG, "Setting the bandwith to 40 MHz failed. Interface doesn't support it.");
-        }
-    }
-
-    setHostName();
-    set3rdOctet();
 
     int32_t hiddenSSID = 0;
     get_config_param_int("ssid_hidden", &hiddenSSID);
@@ -598,8 +600,6 @@ void wifi_init(const char *ssid, const char *passwd, const char *static_ip, cons
         hiddenSSID = 0;
     }
 
-    /* ESP WIFI CONFIG */
-    wifi_config_t wifi_config = {0};
     wifi_config_t ap_config = {
         .ap = {
             .authmode = WIFI_AUTH_WPA2_WPA3_PSK,
@@ -608,63 +608,101 @@ void wifi_init(const char *ssid, const char *passwd, const char *static_ip, cons
             .beacon_interval = 100,
             .pairwise_cipher = WIFI_CIPHER_TYPE_CCMP}};
 
-    strlcpy((char *)ap_config.sta.ssid, ap_ssid, sizeof(ap_config.sta.ssid));
+    strlcpy((char *)ap_config.ap.ssid, ap_ssid, sizeof(ap_config.ap.ssid));
 
     if (strlen(ap_passwd) < 8)
     {
         ap_config.ap.authmode = WIFI_AUTH_OPEN;
+        memset(ap_config.ap.password, 0, sizeof(ap_config.ap.password));
     }
     else
     {
-        strlcpy((char *)ap_config.sta.password, ap_passwd, sizeof(ap_config.sta.password));
+        strlcpy((char *)ap_config.ap.password, ap_passwd, sizeof(ap_config.ap.password));
+    }
+    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap_config));
+}
+
+static void start_wifi_sta(const char *ssid, const char *passwd, const char *static_ip, const char *subnet_mask, const char *gateway_addr, const char *sta_user, const char *sta_identity)
+{
+    wifiSTA = esp_netif_create_default_wifi_sta();
+    uplink_netif = wifiSTA;
+
+    esp_netif_ip_info_t ipInfo_sta;
+    if ((strlen(ssid) > 0) && (strlen(static_ip) > 0) && (strlen(subnet_mask) > 0) && (strlen(gateway_addr) > 0))
+    {
+        my_ip = ipInfo_sta.ip.addr = ipaddr_addr(static_ip);
+        ipInfo_sta.gw.addr = ipaddr_addr(gateway_addr);
+        ipInfo_sta.netmask.addr = ipaddr_addr(subnet_mask);
+        esp_netif_dhcpc_stop(wifiSTA); // Don't run a DHCP client
+        esp_netif_set_ip_info(wifiSTA, &ipInfo_sta);
+        apply_portmap_tab();
     }
 
-    if (strlen(ssid) > 0)
+    wifi_config_t wifi_config = {0};
+    strlcpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
+    bool isWpaEnterprise = (sta_identity != NULL && strlen(sta_identity) != 0) || (sta_user != NULL && strlen(sta_user) != 0);
+    if (!isWpaEnterprise)
     {
-        strlcpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
-        bool isWpaEnterprise = (sta_identity != NULL && strlen(sta_identity) != 0) || (sta_user != NULL && strlen(sta_user) != 0);
-        if (!isWpaEnterprise)
+        strlcpy((char *)wifi_config.sta.password, passwd, sizeof(wifi_config.sta.password));
+    }
+
+    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
+
+    if (isWpaEnterprise)
+    {
+        ESP_LOGI(TAG, "WPA enterprise settings found!");
+        setWpaEnterprise(sta_identity, sta_user, passwd);
+    }
+
+    int32_t isLowerBandwith = 0;
+    get_config_param_int("lower_bandwith", &isLowerBandwith);
+    if (isLowerBandwith == 1)
+    {
+        ESP_LOGI(TAG, "Setting the bandwith to 40 MHz");
+        esp_err_t err = esp_wifi_set_bandwidth(ESP_IF_WIFI_STA, WIFI_BW_HT40);
+        if (err == ESP_ERR_INVALID_ARG)
         {
-            strlcpy((char *)wifi_config.sta.password, passwd, sizeof(wifi_config.sta.password));
-        }
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-        ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap_config));
-        ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
-
-        if (isWpaEnterprise)
-        {
-            ESP_LOGI(TAG, "WPA enterprise settings found!");
-            setWpaEnterprise(sta_identity, sta_user, passwd);
+            ESP_LOGE(TAG, "Setting the bandwith to 40 MHz failed. Interface doesn't support it.");
         }
     }
-    else
-    {
-        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-        ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap_config));
-    }
-    esp_ip_addr_t dnsserver;
-    char *defaultIP = getDefaultIPByNetmask();
-    dnsserver.u_addr.ip4.addr = esp_ip4addr_aton(defaultIP);
+}
 
-    setDnsServer(wifiAP, &dnsserver);
+static void start_ethernet(void)
+{
+    // Create new default instance of esp-netif for Ethernet
+    esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
+    eth_netif = esp_netif_new(&cfg);
+    uplink_netif = eth_netif;
 
-    free(defaultIP);
+    // Init MAC and PHY configs to default
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
 
-    xEventGroupWaitBits(wifi_event_group, CONNECTED_BIT,
-                        pdFALSE, pdTRUE, JOIN_TIMEOUT_MS / portTICK_PERIOD_MS);
-    ESP_ERROR_CHECK(esp_wifi_start());
+    // WT32-ETH01 PHY config
+    phy_config.phy_addr = 0;
+    phy_config.reset_gpio_num = 5;
 
-    if (strlen(ssid) > 0)
-    {
-        ESP_LOGI(TAG, "wifi_init_apsta finished.");
-        ESP_LOGI(TAG, "connect to ap SSID: %s Password: %s", ssid, passwd);
-    }
-    else
-    {
-        ESP_LOGI(TAG, "wifi_init_ap with default finished.");
-    }
-    setTxPower();
-    start_dns_server();
+    // Init MAC
+    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&mac_config);
+    // Init PHY
+    esp_eth_phy_t *phy = esp_eth_phy_new_lan8720(&phy_config);
+
+    esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
+    esp_eth_handle_t eth_handle = NULL;
+    ESP_ERROR_CHECK(esp_eth_driver_install(&config, ð_handle));
+
+    // The EMAC_CLK_OUT signal needs to be output on GPIO0 for the RMII clock.
+    // Some boards might do this automatically. It's safe to add.
+    // NOTE: This is for RMII clock on GPIO0. WT32-ETH01 uses an external crystal,
+    // so this might not be needed, but it doesn't hurt.
+    // gpio_set_direction(GPIO_NUM_0, GPIO_MODE_OUTPUT);
+    // gpio_set_level(GPIO_NUM_0, 1);
+
+    /* attach Ethernet driver to TCP/IP stack */
+    ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_get_netif_glue(eth_handle)));
+
+    /* start Ethernet driver state machine */
+    ESP_ERROR_CHECK(esp_eth_start(eth_handle));
 }
 
 char *param_set_default(const char *def_val)
@@ -841,8 +879,64 @@ void app_main(void)
 
     get_portmap_tab();
 
-    // Setup WIFI
-    wifi_init(ssid, passwd, static_ip, subnet_mask, gateway_addr, ap_ssid, ap_passwd, ap_ip, sta_user, sta_identity);
+    // Setup network
+    wifi_event_group = xEventGroupCreate();
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // Register event handlers
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(ETH_EVENT, ESP_EVENT_ANY_ID, ð_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_got_ip, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &on_got_ip, NULL, NULL));
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+
+    setHostName();
+    set3rdOctet();
+
+    char *uplink_mode = NULL;
+    get_config_param_str("uplink_mode", &uplink_mode);
+
+    if (uplink_mode != NULL && strcmp(uplink_mode, "eth") == 0)
+    {
+        ESP_LOGI(TAG, "Uplink mode: Ethernet");
+        ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+        start_ethernet();
+        free(uplink_mode);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Uplink mode: Wi-Fi");
+        if (strlen(ssid) > 0)
+        {
+            ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+            start_wifi_sta(ssid, passwd, static_ip, subnet_mask, gateway_addr, sta_user, sta_identity);
+        }
+        else
+        {
+            ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
+        }
+    }
+    start_wifi_ap(ap_ssid, ap_passwd, ap_ip);
+
+    esp_ip_addr_t dnsserver;
+    char *defaultIP = getDefaultIPByNetmask();
+    dnsserver.u_addr.ip4.addr = esp_ip4addr_aton(defaultIP);
+    setDnsServer(wifiAP, &dnsserver);
+    free(defaultIP);
+
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    if (uplink_netif == wifiSTA)
+    {
+        ESP_LOGI(TAG, "wifi_init_apsta finished.");
+        ESP_LOGI(TAG, "connect to ap SSID: %s Password: %s", ssid, passwd);
+    }
+
+    setTxPower();
+    start_dns_server();
 
     pthread_t t1;
     int32_t led_disabled = 0;
@@ -893,7 +987,7 @@ void app_main(void)
            "Use UP/DOWN arrows to navigate through command history.\n"
            "Press TAB when typing command name to auto-complete.\n");
 
-    if (strlen(ssid) == 0)
+    if (strlen(ssid) == 0 && (uplink_netif != eth_netif))
     {
         printf("\n"
                "Unconfigured WiFi\n"
