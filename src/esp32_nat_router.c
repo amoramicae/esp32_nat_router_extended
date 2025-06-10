@@ -50,7 +50,7 @@
 
 #include "router_globals.h"
 
-// On board LED
+
 #define BLINK_GPIO 2
 
 #if CONFIG_IDF_TARGET_ESP32
@@ -694,18 +694,19 @@ static void start_ethernet(void)
     // Use the newer struct for SMI GPIO configuration
     esp32_emac_config.smi_mdc_gpio_num = 23;
     esp32_emac_config.smi_mdio_gpio_num = 18;
-    
+    esp32_emac_config.smi_gpio.clock_speed = ETH_SMI_SPEED_DEFAULT;
+   
     // Create new ESP32 MAC instance
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&esp32_emac_config, &mac_config);
     // Create new PHY instance
     esp_eth_phy_t *phy = esp_eth_phy_new_lan87xx(&phy_config);
 
     esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
-    esp_eth_handle_t eth_handle = NULL;
+    esp_eth_handle_t eth_handle= NULL;
     ESP_ERROR_CHECK(esp_eth_driver_install(&config, ð_handle));
     
     /* The ESP32 is wired for RMII interface, so attach the driver to it */
-    void *glue = esp_eth_get_netif_glue(eth_handle);
+    void *glue = esp_eth_new_netif_glue(eth_handle);
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, glue));
 
     /* start Ethernet driver state machine */
